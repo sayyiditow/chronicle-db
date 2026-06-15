@@ -982,7 +982,7 @@ public class Server {
 
     public static void main(final String[] args) throws Throwable {
         // Write procId to disk
-        CHRONICLE_UTILS.logProcessId(processId);
+        CHRONICLE_UTILS.acquireProcessLock(processId);
 
         Logger.info("Heavy query gate: [{}] concurrent permits, [{}]ms acquire timeout.",
                 HEAVY_QUERY_PERMITS, HEAVY_QUERY_ACQUIRE_TIMEOUT_MS);

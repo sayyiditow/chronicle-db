@@ -1977,10 +1977,20 @@ public final class ChronicleUtils {
         }
     }
 
-    public void logProcessId(final String fileName) throws IOException {
+    public void acquireProcessLock(final String fileName) throws IOException {
+        final var pidFile = Path.of(fileName);
+        if (Files.exists(pidFile)) {
+            final var existingPid = Long.parseLong(Files.readString(pidFile).strip());
+            final var isAlive = ProcessHandle.of(existingPid).map(ProcessHandle::isAlive).orElse(false);
+            if (isAlive) {
+                throw new IllegalStateException(
+                        "Another instance is already running with PID " + existingPid + ". Startup aborted.");
+            }
+            Logger.warn("Stale procid file found (PID {} is no longer running). Proceeding with startup.", existingPid);
+        }
         final var pid = ProcessHandle.current().pid();
         Logger.info("Process ID for this task: {}", pid);
-        Files.writeString(Path.of(fileName), String.valueOf(pid));
+        Files.writeString(pidFile, String.valueOf(pid));
     }
 
     public String getCurrentDate() {
