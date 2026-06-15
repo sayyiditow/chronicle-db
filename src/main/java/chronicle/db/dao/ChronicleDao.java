@@ -959,6 +959,24 @@ public interface ChronicleDao<V> {
         }
     }
 
+    default void recoverAllData() throws IOException {
+        final var dataDir = Path.of(dataPath() + DATA_DIR);
+        if (!Files.exists(dataDir)) {
+            Logger.warn("Data directory not found for recovery: {}", dataDir);
+            return;
+        }
+        try (final var stream = Files.list(dataDir)) {
+            final var files = stream
+                    .map(p -> p.getFileName().toString())
+                    .filter(name -> name.startsWith(DATA_FILE) && !name.startsWith(LOCKED_FILE))
+                    .toList();
+            Logger.info("Recovering {} data file(s) in {}", files.size(), dataDir);
+            for (final var fileName : files) {
+                recoverData(fileName);
+            }
+        }
+    }
+
     /**
      * Looks up the database file name for a given primary key.
      * Calculates the 128-bit hash internally.

@@ -436,8 +436,8 @@ public final class ChronicleDb {
                 Logger.warn("InterProcessDeadLockException detected for [{}]. Attempting recovery...", filePath);
                 return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
             } catch (final IOException e) {
-                Logger.error("Failed to open ChronicleMap at [{}]", filePath);
-                throw new UncheckedIOException(e);
+                Logger.warn("IOException detected for [{}]. Attempting recovery...", filePath);
+                return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
             } catch (final RuntimeException e) {
                 // Check if wrapped exception is InterProcessDeadLockException
                 if (hasDeadlockCause(e)) {

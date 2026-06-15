@@ -32,7 +32,11 @@ public final class DeadlockService {
             final var filePath = map.get("filePath");
             final var fileName = map.get("fileName");
             final var dao = ChronicleDaoService.CHRONICLE_DAO_SERVICE.getDao(fqn, dbDir, filePath);
-            dao.recoverData(fileName);
+            if (fileName == null) {
+                dao.recoverAllData();
+            } else {
+                dao.recoverData(fileName);
+            }
         }
 
         if (configSize > 0) {
