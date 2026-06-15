@@ -178,7 +178,7 @@ public interface ChronicleDao<V> {
     ConcurrentMap<String, String> KEY_MAP_PATH_CACHE = new ConcurrentHashMap<>();
     String DATA_DIR = "/data/", INDEX_DIR = "/indexes/", FILES_DIR = "/files/", BACKUP_DIR = "/backup/",
             DATA_FILE = "data", LOCKED_FILE = "locked-", RECOVER_FILE = "recovery", ENTRY_SIZE_FILE = "entrySize",
-            KEY_FILE = "keys";
+            KEY_FILE = "keys", TMP_SUFFIX = ".tmp", INDEX_REBUILDING_MARKER = ".rebuilding";
     String[] DB_DIRS = { DATA_DIR, INDEX_DIR, FILES_DIR, BACKUP_DIR };
 
     // Vacuum staging — transient. Created on-demand by vacuum(), cleaned up by
@@ -592,17 +592,24 @@ public interface ChronicleDao<V> {
 
             CHRONICLE_UTILS.doWithLock(WRITE_LOCKS, dataPath(), () -> {
                 final var keyMapPath = getKeyMapPath();
+                final var tmpKeyMapPath = keyMapPath + TMP_SUFFIX;
+                // Clean up any stale tmp left by a previous interrupted rebuild
+                CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
                 // only if we have indexes/have multiple files otherwise hashes are not required
                 // to be tracked
                 if (hasKeyMap() && !Files.exists(Path.of(keyMapPath))) {
-                    try (final var sharedKeyMap = MAP_DB.openMap(keyMapPath, entries())) {
+                    try (final var sharedKeyMap = MAP_DB.openMap(tmpKeyMapPath, entries())) {
                         populateKeyMap(getDataFileState().fileNames(), sharedKeyMap);
                     } catch (final Exception e) {
-                        // Delete corrupt keyMap so it rebuilds on next startup
-                        // (try-with-resources already closed the map)
                         Logger.error("Failed to populate KeyMap at [{}]. Deleting for rebuild.", keyMapPath);
-                        CHRONICLE_UTILS.deleteFileIfExists(keyMapPath);
+                        CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
                         throw e;
+                    }
+                    try {
+                        Files.move(Path.of(tmpKeyMapPath), Path.of(keyMapPath), StandardCopyOption.ATOMIC_MOVE);
+                    } catch (final IOException e) {
+                        CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
+                        throw new UncheckedIOException(e);
                     }
                     Logger.info("Initialized KeyMap at [{}]", dataPath());
                 }
@@ -794,11 +801,21 @@ public interface ChronicleDao<V> {
      * @param fields the field names to create indexes for
      */
     private void initIndex(final Set<String> fields) {
-        CHRONICLE_UTILS.processInParallel(getDataFileState().fileNames(), file -> {
-            try (final var shared = openDb(file)) {
-                initIndex(shared, fields);
-            }
-        });
+        final var markerPath = dataPath() + INDEX_DIR + INDEX_REBUILDING_MARKER;
+        try {
+            Files.writeString(Path.of(markerPath), "");
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        try {
+            CHRONICLE_UTILS.processInParallel(getDataFileState().fileNames(), file -> {
+                try (final var shared = openDb(file)) {
+                    initIndex(shared, fields);
+                }
+            });
+        } finally {
+            CHRONICLE_UTILS.deleteFileIfExists(markerPath);
+        }
     }
 
     /**
@@ -847,16 +864,22 @@ public interface ChronicleDao<V> {
         try {
             CHRONICLE_UTILS.doWithLock(WRITE_LOCKS, dataPath(), () -> {
                 final var keyMapPath = getKeyMapPath();
+                final var tmpKeyMapPath = keyMapPath + TMP_SUFFIX;
                 MAP_DB.closeMap(keyMapPath);
                 CHRONICLE_UTILS.deleteFileIfExists(keyMapPath);
-                try (final var sharedKeyMap = MAP_DB.openMap(keyMapPath, entries())) {
+                CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
+                try (final var sharedKeyMap = MAP_DB.openMap(tmpKeyMapPath, entries())) {
                     populateKeyMap(getDataFileState().fileNames(), sharedKeyMap);
                 } catch (final Exception e) {
-                    // Delete corrupt keyMap so it rebuilds on next startup
-                    // (try-with-resources already closed the map)
                     Logger.error("Failed to refresh KeyMap at [{}]. Deleting for rebuild.", keyMapPath);
-                    CHRONICLE_UTILS.deleteFileIfExists(keyMapPath);
+                    CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
                     throw e;
+                }
+                try {
+                    Files.move(Path.of(tmpKeyMapPath), Path.of(keyMapPath), StandardCopyOption.ATOMIC_MOVE);
+                } catch (final IOException e) {
+                    CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
+                    throw new UncheckedIOException(e);
                 }
                 Logger.info("Refreshed KeyMap at [{}]", dataPath());
             });
@@ -901,6 +924,17 @@ public interface ChronicleDao<V> {
         try {
             if (!getDataFileState().fileNames().isEmpty()) {
                 CHRONICLE_UTILS.doWithLock(WRITE_LOCKS, dataPath(), new SafeRunnable(() -> {
+                    // Clean up any interrupted rebuild from a previous run
+                    final var rebuildingMarker = Path.of(dataPath() + INDEX_DIR + INDEX_REBUILDING_MARKER);
+                    if (Files.exists(rebuildingMarker)) {
+                        Logger.warn("Incomplete index rebuild detected at [{}]. Wiping indexes for clean rebuild.", dataPath());
+                        for (final var index : availableIndexes()) {
+                            MAP_DB.closeIndex(getIndexPath(index));
+                            CHRONICLE_UTILS.deleteFileIfExists(getIndexPath(index));
+                        }
+                        CHRONICLE_UTILS.deleteFileIfExists(rebuildingMarker.toString());
+                    }
+
                     final var availableIndexes = availableIndexes();
                     final var indexFileNames = indexFileNames();
 

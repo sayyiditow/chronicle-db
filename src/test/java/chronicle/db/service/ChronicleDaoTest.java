@@ -1,6 +1,7 @@
 package chronicle.db.service;
 
 import static chronicle.db.service.ChronicleDb.CHRONICLE_DB;
+import static chronicle.db.service.MapDb.MAP_DB;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -845,5 +846,113 @@ public class ChronicleDaoTest {
                 List.of(new Search("fullName", SearchType.EQUAL, "Vac180")));
         assertTrue(movedKeyResults.containsKey("vac-180"),
                 "Indexed search should find moved record 'vac-180'");
+    }
+
+    // ==================== CRASH SAFETY (TMP/MARKER) ====================
+
+    @Test
+    @Order(100)
+    void crashSafe_staleKeyMapTmp_cleanedAndRebuiltOnStartup() throws Throwable {
+        final var path = "src/test/.data/crash-km-stale/";
+        final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
+        dao.put("km-1", createLead("KmOne", "km1@test.com"));
+
+        final var keyMapPath = dao.getKeyMapPath();
+        final var tmpPath = keyMapPath + ChronicleDao.TMP_SUFFIX;
+
+        // Simulate interrupted rebuild: close keymap, delete it, leave stale .tmp
+        MAP_DB.closeMap(keyMapPath);
+        Files.deleteIfExists(Path.of(keyMapPath));
+        Files.writeString(Path.of(tmpPath), "stale");
+
+        assertTrue(Files.exists(Path.of(tmpPath)));
+        assertFalse(Files.exists(Path.of(keyMapPath)));
+
+        // New startup: createDataDirs() must clean .tmp and rebuild keys
+        CHRONICLE_DB.getChronicleDao(DAO, path);
+
+        assertFalse(Files.exists(Path.of(tmpPath)), "stale keys.tmp should be deleted on startup");
+        assertTrue(Files.exists(Path.of(keyMapPath)), "keymap should be rebuilt after stale tmp cleanup");
+    }
+
+    @Test
+    @Order(101)
+    void crashSafe_successfulKeyMapBuild_leavesNoTmp() throws Throwable {
+        final var path = "src/test/.data/crash-km-clean/";
+        final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
+        dao.put("km-2", createLead("KmTwo", "km2@test.com"));
+
+        assertTrue(Files.exists(Path.of(dao.getKeyMapPath())), "keys should exist after build");
+        assertFalse(Files.exists(Path.of(dao.getKeyMapPath() + ChronicleDao.TMP_SUFFIX)),
+                "keys.tmp should not remain after a successful keymap build");
+    }
+
+    @Test
+    @Order(102)
+    void crashSafe_refreshKeyMap_leavesNoTmp() throws Throwable {
+        final var path = "src/test/.data/crash-km-refresh/";
+        final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
+        dao.put("km-3", createLead("KmThree", "km3@test.com"));
+
+        dao.refreshKeyMap();
+
+        assertTrue(Files.exists(Path.of(dao.getKeyMapPath())), "keys should exist after refresh");
+        assertFalse(Files.exists(Path.of(dao.getKeyMapPath() + ChronicleDao.TMP_SUFFIX)),
+                "keys.tmp should not remain after refreshKeyMap completes");
+    }
+
+    @Test
+    @Order(103)
+    void crashSafe_rebuildingMarker_indexWipedAndRebuiltOnStartup() throws Throwable {
+        final var path = "src/test/.data/crash-idx-marker/";
+        final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
+        dao.put("idx-1", createLead("IdxOne", "idx1@test.com"));
+
+        final var indexPath = dao.getIndexPath("fullName");
+        final var markerPath = dao.dataPath() + ChronicleDao.INDEX_DIR + ChronicleDao.INDEX_REBUILDING_MARKER;
+
+        assertTrue(Files.exists(Path.of(indexPath)), "index should exist after initial build");
+        assertFalse(Files.exists(Path.of(markerPath)), "no marker should exist after clean build");
+
+        // Simulate interrupted rebuild: leave marker alongside existing index
+        Files.writeString(Path.of(markerPath), "");
+
+        // New startup: initDefaultIndexes() must detect marker, wipe index, and rebuild
+        CHRONICLE_DB.getChronicleDao(DAO, path);
+
+        assertFalse(Files.exists(Path.of(markerPath)), "rebuilding marker should be gone after startup recovery");
+        assertTrue(Files.exists(Path.of(indexPath)), "index should be rebuilt after marker-triggered wipe");
+    }
+
+    @Test
+    @Order(104)
+    void crashSafe_successfulIndexBuild_leavesNoMarker() throws Throwable {
+        final var path = "src/test/.data/crash-idx-clean/";
+        final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
+        dao.put("idx-2", createLead("IdxTwo", "idx2@test.com"));
+
+        final var markerPath = dao.dataPath() + ChronicleDao.INDEX_DIR + ChronicleDao.INDEX_REBUILDING_MARKER;
+        assertFalse(Files.exists(Path.of(markerPath)),
+                "rebuilding marker should not exist after a successful index build");
+    }
+
+    @Test
+    @Order(105)
+    void crashSafe_recoverAllData_allFilesIntactAfterRecovery() throws Throwable {
+        final var path = "src/test/.data/crash-recover/";
+        final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
+        dao.put("rec-1", createLead("RecOne", "rec1@test.com"));
+        dao.put("rec-2", createLead("RecTwo", "rec2@test.com"));
+
+        final int sizeBefore = dao.size();
+
+        // Close the open map so recoverDb can open the file in recovery mode
+        CHRONICLE_DB.close(dao.dataPath() + ChronicleDao.DATA_DIR + "data");
+
+        dao.recoverAllData();
+
+        assertEquals(sizeBefore, dao.size(), "all records should still be present after recoverAllData");
+        assertNotNull(dao.get("rec-1"), "rec-1 should be accessible after recovery");
+        assertNotNull(dao.get("rec-2"), "rec-2 should be accessible after recovery");
     }
 }
