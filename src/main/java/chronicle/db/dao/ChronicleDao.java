@@ -960,21 +960,15 @@ public interface ChronicleDao<V> {
     }
 
     default void recoverAllData() throws IOException {
-        final var dataDir = Path.of(dataPath() + DATA_DIR);
-        if (!Files.exists(dataDir)) {
-            Logger.warn("Data directory not found for recovery: {}", dataDir);
-            return;
-        }
-        try (final var stream = Files.list(dataDir)) {
-            final var files = stream
-                    .map(p -> p.getFileName().toString())
-                    .filter(name -> name.startsWith(DATA_FILE) && !name.startsWith(LOCKED_FILE))
-                    .toList();
-            Logger.info("Recovering {} data file(s) in {}", files.size(), dataDir);
-            for (final var fileName : files) {
+        final var files = getDataFileState().fileNames();
+        Logger.info("Recovering {} data file(s) in {}", files.size(), dataPath());
+        CHRONICLE_UTILS.processInParallel(files, fileName -> {
+            try {
                 recoverData(fileName);
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
             }
-        }
+        });
     }
 
     /**
