@@ -436,11 +436,11 @@ public final class ChronicleDb {
                 Logger.warn("InterProcessDeadLockException detected for [{}]. Attempting recovery...", filePath);
                 return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
             } catch (final IOException e) {
-                Logger.warn("IOException detected for [{}]. Attempting recovery...", filePath);
-                return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
+                Logger.error("Failed to open ChronicleMap at [{}]. Add to deadlocks.json for recovery.", filePath);
+                throw new UncheckedIOException(e);
             } catch (final RuntimeException e) {
                 // Check if wrapped exception is InterProcessDeadLockException
-                if (hasRecoverableCause(e)) {
+                if (hasDeadlockCause(e)) {
                     Logger.warn("InterProcessDeadLockException detected for [{}]. Attempting recovery...", filePath);
                     return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
                 }
@@ -497,10 +497,10 @@ public final class ChronicleDb {
         Logger.debug("All ChronicleMaps have been closed and mapCache cleared.");
     }
 
-    private boolean hasRecoverableCause(final Throwable e) {
+    private boolean hasDeadlockCause(final Throwable e) {
         Throwable cause = e;
         while (cause != null) {
-            if (cause instanceof InterProcessDeadLockException || cause instanceof IOException) {
+            if (cause instanceof InterProcessDeadLockException) {
                 return true;
             }
             cause = cause.getCause();
