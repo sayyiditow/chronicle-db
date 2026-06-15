@@ -440,7 +440,7 @@ public final class ChronicleDb {
                 return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
             } catch (final RuntimeException e) {
                 // Check if wrapped exception is InterProcessDeadLockException
-                if (hasDeadlockCause(e)) {
+                if (hasRecoverableCause(e)) {
                     Logger.warn("InterProcessDeadLockException detected for [{}]. Attempting recovery...", filePath);
                     return recoverFromDeadlock(name, entries, averageKeySize, averageValue, filePath, maxBloatFactor);
                 }
@@ -497,14 +497,10 @@ public final class ChronicleDb {
         Logger.debug("All ChronicleMaps have been closed and mapCache cleared.");
     }
 
-    /**
-     * Checks if the exception cause chain contains an
-     * InterProcessDeadLockException.
-     */
-    private boolean hasDeadlockCause(final Throwable e) {
+    private boolean hasRecoverableCause(final Throwable e) {
         Throwable cause = e;
         while (cause != null) {
-            if (cause instanceof InterProcessDeadLockException) {
+            if (cause instanceof InterProcessDeadLockException || cause instanceof IOException) {
                 return true;
             }
             cause = cause.getCause();
