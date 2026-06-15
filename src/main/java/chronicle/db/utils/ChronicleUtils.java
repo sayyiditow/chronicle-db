@@ -15,6 +15,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -499,7 +500,8 @@ public final class ChronicleUtils {
     }
 
     /**
-     * Evaluates the scalar length comparison operators against {@code currentValue}.
+     * Evaluates the scalar length comparison operators against
+     * {@code currentValue}.
      * Returns {@code false} for non-string values or non-integer search terms.
      */
     private boolean matchesLengthOp(final Object currentValue, final Object searchTerm, final SearchType op) {
@@ -1390,8 +1392,11 @@ public final class ChronicleUtils {
     public void deleteFileIfExists(final String filePath) {
         try {
             Files.delete(Path.of(filePath));
+        } catch (final NoSuchFileException e) {
+            // ignored
         } catch (final IOException e) {
-            Logger.info("File for deletion does not exist [{}].", filePath);
+            Logger.info("IOException when deleting [{}].", filePath);
+            Logger.error(e);
         }
     }
 
