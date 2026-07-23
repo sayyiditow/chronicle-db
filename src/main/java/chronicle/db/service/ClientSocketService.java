@@ -504,7 +504,7 @@ public class ClientSocketService {
                     returnSocket(pooledSocket);
                     return null;
                 } else if ("503".equals(status)) {
-                    Logger.info("DB is upgrading. Reconnecting...");
+                    Logger.info("DB is busy. Retrying...");
                     returnSocket(pooledSocket);
                     Thread.sleep(waitTimeout);
                     continue;
@@ -559,7 +559,7 @@ public class ClientSocketService {
                     returnSocket(pooledSocket);
                     return null;
                 } else if ("503".equals(status)) {
-                    Logger.info("DB is upgrading. Reconnecting...");
+                    Logger.info("DB is busy. Retrying...");
                     returnSocket(pooledSocket);
                     Thread.sleep(waitTimeout);
                     continue;

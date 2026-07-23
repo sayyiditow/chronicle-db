@@ -112,7 +112,7 @@ public class Server {
     private static int metricsPort = 0;
     private static Set<String> metricsAllowedIps = Set.of();
     private static int queueSize = 512;
-    private static boolean upgrading = false;
+    private static boolean busy = false;
     public static boolean replicationEnabled = false;
     private static ReplicationQueue replicationQueue = null;
     private static final int batchSizeMedium = Integer.getInteger("chronicle.db.batchSizeMedium", 20_000);
@@ -534,13 +534,13 @@ public class Server {
     private static boolean isAllSafeToFailOver(final Map<String, List<String>> fqnMap)
             throws InterruptedException, IOException {
         if (replicationQueue != null) {
-            upgrading = true;
+            busy = true;
 
             // 1. Ensure Primary is up to date with its own WAL
             final String primaryTailer = ReplicationQueue.getPrimaryTailerName();
             if (!replicationQueue.isEmpty(primaryTailer)) {
                 Logger.info("❌ Primary tailer has pending writes. Retry in a while.");
-                upgrading = false;
+                busy = false;
                 return false;
             }
             Logger.info("✅ Primary tailer is at end, no more pending writes. Checking standby DBs.");
@@ -558,7 +558,7 @@ public class Server {
             }
 
             Logger.info("All standby DBs are [{}] to fail over.", safe ? "safe" : "not safe");
-            upgrading = false;
+            busy = false;
             return safe;
         }
         Logger.info("No standby DBs set.");
@@ -943,8 +943,8 @@ public class Server {
             return;
         }
 
-        if (upgrading) {
-            Logger.info("DB is upgrading.");
+        if (busy) {
+            Logger.info("DB is busy...");
             respond(Map.of("status", "503"), dataSocket);
             return;
         }
@@ -1044,7 +1044,7 @@ public class Server {
             SHUTDOWN_REQUESTED.set(true);
 
             // block new requests at server level
-            upgrading = true;
+            busy = true;
 
             // Drain in-flight writes, but cap the wait. If the counter is
             // stuck (e.g. a worker thread died before decrementing), an
