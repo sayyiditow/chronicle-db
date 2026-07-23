@@ -394,7 +394,10 @@ public class ReplicationQueue {
                                 }
                             });
                         } catch (final Exception e) {
-                            // Stop if processor throws exception
+                            // Stop if queue reading or processor throws exception. The
+                            // current record must remain pending for a later retry.
+                            Logger.error(e, "Failed reading or processing replication record for tailer [{}]. "
+                                    + "The tailer will remain on the current record.", tailerName);
                             break;
                         }
 

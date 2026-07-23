@@ -426,15 +426,17 @@ public class Server {
                         dbService.execute(data);
                         return true; // Standby received and processed the command
                     } catch (final InterruptedException e) {
+                        Logger.warn(e, "Replication for tailer [{}] interrupted while sending write. Thread interrupt status will be preserved.",
+                                tailerName);
                         Thread.currentThread().interrupt();
                         return false;
                     } catch (final Exception e) {
                         // Connection/network failure - retry
-                        Logger.warn("Replication for tailer [{}] failed - will retry. Error: {}", tailerName,
-                                e.getMessage());
+                        Logger.warn(e, "Replication for tailer [{}] failed - will retry.", tailerName);
                         try {
                             Thread.sleep(2000);
                         } catch (final InterruptedException ie) {
+                            Logger.warn(ie, "Replication retry sleep interrupted for tailer [{}].", tailerName);
                             Thread.currentThread().interrupt();
                         }
                         return false;
@@ -450,7 +452,7 @@ public class Server {
                 try {
                     Thread.sleep(5000); // Pause 5 seconds if no writes processed
                 } catch (final InterruptedException e) {
-                    Logger.info("Replication thread for [{}] interrupted.", tailerName);
+                    Logger.warn(e, "Replication thread for [{}] interrupted during idle wait.", tailerName);
                     Thread.currentThread().interrupt();
                     return; // Exit thread on interrupt
                 }
@@ -1012,8 +1014,10 @@ public class Server {
                         try {
                             sendAllPendingWrites(tailerName, server.dbService());
                         } catch (final InterruptedException e) {
-                            Logger.info("Replication thread for [{}] interrupted.", tailerName);
+                            Logger.warn(e, "Replication thread for [{}] interrupted and is stopping.", tailerName);
                             Thread.currentThread().interrupt();
+                        } catch (final Throwable e) {
+                            Logger.error(e, "Replication thread for [{}] terminated unexpectedly.", tailerName);
                         }
                     });
                 }
