@@ -4,6 +4,9 @@ import static chronicle.db.utils.ChronicleUtils.CHRONICLE_UTILS;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.function.Supplier;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
@@ -85,6 +88,56 @@ public final class MapDb {
     private static final ConcurrentMap<String, SharedKeyMap> mapCache = new ConcurrentHashMap<>(CACHE_INITIAL_CAPACITY);
     private static final ConcurrentMap<String, SharedIndexSet> treeCache = new ConcurrentHashMap<>(
             CACHE_INITIAL_CAPACITY);
+    private record Recovery(Runnable rebuild) {}
+    private static final ConcurrentMap<String, Recovery> recoveries = new ConcurrentHashMap<>();
+
+    /**
+     * Associates a derived store with its DAO population routine. The callback runs
+     * outside cache.compute(), and must publish a complete, closed replacement.
+     */
+    public void registerRecovery(final String filePath, final Runnable rebuild) {
+        recoveries.put(filePath, new Recovery(rebuild));
+    }
+
+    public static final class StoreUnavailableException extends IllegalStateException {
+        StoreUnavailableException(final String path, final Throwable cause) {
+            super("Derived store requires rebuilding: " + path, cause);
+        }
+    }
+
+    private <T> T withRecovery(final String path, final Supplier<T> open) {
+        try {
+            return open.get();
+        } catch (final StoreUnavailableException failure) {
+            final var recovery = recoveries.get(path);
+            if (recovery == null) {
+                throw failure;
+            }
+            // The rebuild callback serializes callers on the DAO write lock and
+            // re-probes health once it holds it, so racing callers rebuild once.
+            // Do not add a monitor here: callers may already hold that write lock.
+            Logger.warn(failure, "Rebuilding derived store [{}]", path);
+            recovery.rebuild().run();
+            return open.get(); // bounded retry; never return an empty substitute
+        }
+    }
+
+    /** True if the store opens cleanly now. Never triggers recovery itself. */
+    public boolean isHealthy(final String path, final boolean index, final long expectedEntries) {
+        try {
+            if (index) {
+                try (final var ignored = openIndexOnce(path, expectedEntries)) {
+                    return true;
+                }
+            }
+            try (final var ignored = openMapOnce(path, expectedEntries)) {
+                return true;
+            }
+        } catch (final StoreUnavailableException e) {
+            return false;
+        }
+    }
+
     private static final byte indexSep = 0x1F;
     private static final byte upperByte = (byte) 0xFF;
 
@@ -288,6 +341,10 @@ public final class MapDb {
      * @return HTreeMap or null, if null do not run close()
      */
     public SharedKeyMap openMap(final String filePath, final long expectedEntries) {
+        return withRecovery(filePath, () -> openMapOnce(filePath, expectedEntries));
+    }
+
+    private SharedKeyMap openMapOnce(final String filePath, final long expectedEntries) {
         // ~200 bytes per entry (16 byte key + ~100 char string + 1 byte + MapDB
         // overhead) Minimum 4MB, maximum 512MB
         final long bytesPerEntry = 200;
@@ -301,6 +358,10 @@ public final class MapDb {
                 return existingEntry.retain();
             }
 
+            // Managed stores must be populated by their owner when missing.
+            if (recoveries.containsKey(filePath) && !Files.exists(Path.of(filePath))) {
+                throw new StoreUnavailableException(filePath, null);
+            }
             // Create a new entry
             try {
                 final HTreeMap<byte[], KeyMapValue> map = DBMaker.fileDB(filePath)
@@ -321,9 +382,7 @@ public final class MapDb {
                 return new SharedKeyMap(map, filePath);
             } catch (final DBException.DataCorruption | DBException.VolumeEOF | NegativeArraySizeException
                     | DBException.WrongFormat | InternalError e) {
-                CHRONICLE_UTILS.deleteFileIfExists(filePath); // let it reinit
-                Logger.error("Reinitializing KeyMap at [{}]", filePath);
-                throw new RuntimeException(e);
+                throw new StoreUnavailableException(filePath, e);
             } catch (final Exception e) {
                 Logger.error("Failed to open KeyMap at [{}]", filePath);
                 throw new RuntimeException(e);
@@ -394,6 +453,10 @@ public final class MapDb {
      * @return NavigableSet or null, if null do not run close()
      */
     public SharedIndexSet openIndex(final String filePath, final long expectedEntries) {
+        return withRecovery(filePath, () -> openIndexOnce(filePath, expectedEntries));
+    }
+
+    private SharedIndexSet openIndexOnce(final String filePath, final long expectedEntries) {
         // ~100 bytes per index entry (field value ~30 bytes + separator + 16 byte hash
         // + MapDB overhead)
         // Minimum 16MB, maximum 1GB
@@ -408,6 +471,10 @@ public final class MapDb {
                 return existingEntry.retain();
             }
 
+            // Managed stores must be populated by their owner when missing.
+            if (recoveries.containsKey(filePath) && !Files.exists(Path.of(filePath))) {
+                throw new StoreUnavailableException(filePath, null);
+            }
             // Create a new entry
             try {
                 final var db = DBMaker.fileDB(filePath)
@@ -428,9 +495,7 @@ public final class MapDb {
                 return new SharedIndexSet(db, tree, filePath);
             } catch (final DBException.DataCorruption | DBException.VolumeEOF | NegativeArraySizeException
                     | DBException.WrongFormat | InternalError e) {
-                CHRONICLE_UTILS.deleteFileIfExists(filePath); // let it reindex
-                Logger.error("Reinitializing Index at [{}]", filePath);
-                throw new RuntimeException(e);
+                throw new StoreUnavailableException(filePath, e);
             } catch (final Exception e) {
                 Logger.error("Failed to open Index at [{}]", filePath);
                 throw new RuntimeException(e);

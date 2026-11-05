@@ -179,6 +179,8 @@ public interface ChronicleDao<V> {
     String DATA_DIR = "/data/", INDEX_DIR = "/indexes/", FILES_DIR = "/files/", BACKUP_DIR = "/backup/",
             DATA_FILE = "data", LOCKED_FILE = "locked-", RECOVER_FILE = "recovery", ENTRY_SIZE_FILE = "entrySize",
             KEY_FILE = "keys", TMP_SUFFIX = ".tmp", INDEX_REBUILDING_MARKER = ".rebuilding";
+    long RECOVERY_LOCK_WAIT_SECONDS = 30;
+    String RECOVERY_STAGING_DIR = "/recovery-staging/";
     String[] DB_DIRS = { DATA_DIR, INDEX_DIR, FILES_DIR, BACKUP_DIR };
 
     // Vacuum staging — transient. Created on-demand by vacuum(), cleaned up by
@@ -491,6 +493,9 @@ public interface ChronicleDao<V> {
      * @param keyMap    the MapDB HTreeMap to populate
      */
     private void populateKeyMap(final Set<String> dataFiles, final SharedKeyMap sharedKeyMap) {
+        // Scan files in parallel, but propagate the first failure: processInParallel
+        // only logs, and a partially populated keymap must never be published.
+        final var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
         CHRONICLE_UTILS.processInParallel(dataFiles, file -> {
             try (final var shared = openDb(file)) {
                 // Collect keys first (forEachEntry doesn't support parallel)
@@ -500,8 +505,179 @@ public interface ChronicleDao<V> {
                 // Sequential insert to avoid MapDB concurrency issues
                 keys.forEach(primaryKey -> sharedKeyMap.put(CHRONICLE_UTILS.to128BitHash(primaryKey),
                         new KeyMapValue(primaryKey, file)));
+            } catch (final Throwable t) {
+                failure.compareAndSet(null, t);
             }
         });
+        if (failure.get() != null) {
+            throw new IllegalStateException("Failed to scan data files for keymap", failure.get());
+        }
+    }
+
+    /** How long a caller waits for the write lock before recovering a derived store. */
+    default long recoveryLockWaitSeconds() {
+        return RECOVERY_LOCK_WAIT_SECONDS;
+    }
+
+    /** Handles on the derived stores, released by {@link #close()}. */
+    interface StoreHold extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /**
+     * Opens the keymap and every index so that any corrupt or missing store is
+     * rebuilt now, and keeps them open until the returned hold is closed. Call from
+     * the write-lock owner and wrap the fan-out in try-with-resources: recovery
+     * needs the write lock, which a worker thread could never acquire while its
+     * parent holds it, and holding the stores lets the workers share these opens
+     * instead of reopening each store.
+     */
+    default StoreHold holdHealthyDerivedStores() {
+        final var held = new ArrayList<Runnable>();
+        try {
+            if (hasKeyMap()) {
+                final var keyMap = MAP_DB.openMap(getKeyMapPath());
+                held.add(keyMap::close);
+            }
+            for (final var field : indexFileNames()) {
+                final var index = MAP_DB.openIndex(getIndexPath(field));
+                held.add(index::close);
+            }
+        } catch (final RuntimeException e) {
+            held.forEach(Runnable::run);
+            throw e;
+        }
+        return () -> held.forEach(Runnable::run);
+    }
+
+    /**
+     * Rebuilds one derived store without depending on either the keymap or indexes.
+     * Waits up to {@link #RECOVERY_LOCK_WAIT_SECONDS} for the write lock, then fails
+     * explicitly so the caller can retry. Must not be called from a worker thread
+     * whose parent holds the lock (it would wait out the full timeout): callers
+     * run {@link #holdHealthyDerivedStores()} on the lock owner first.
+     */
+    private void recoverDerivedStore(final String filePath, final String field) {
+        final var lock = WRITE_LOCKS.computeIfAbsent(dataPath(), ignored -> new ReentrantLock());
+        try {
+            if (!lock.tryLock(recoveryLockWaitSeconds(), java.util.concurrent.TimeUnit.SECONDS)) {
+                throw new IllegalStateException(
+                        "Timed out waiting for writer before recovering derived store; retry request: " + filePath);
+            }
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted waiting to recover derived store: " + filePath, e);
+        }
+        IN_FLIGHT_WRITES.incrementAndGet();
+        try {
+            if (MAP_DB.isHealthy(filePath, field != null, entries())) {
+                return; // another caller already rebuilt it while we waited
+            }
+            Logger.warn("Rebuilding derived store [{}] from primary data", filePath);
+            final var startNanos = System.nanoTime();
+            withStaging("mapdb-recovery-", staging -> {
+                var replacement = staging.resolve("store");
+                if (field == null) {
+                    try (final var target = MAP_DB.openMap(replacement.toString(), entries())) {
+                        final var files = getDataFileState().fileNames();
+                        for (final var file : files) {
+                            requireDataFile(file);
+                        }
+                        populateKeyMap(files, target);
+                    }
+                } else {
+                    buildIndexes(staging, Set.of(field));
+                    replacement = Path.of(staging + INDEX_DIR + field);
+                }
+                final var live = Path.of(filePath);
+                if (Files.exists(live)) {
+                    Files.copy(live, Path.of(dataPath() + BACKUP_DIR).resolve(
+                            live.getFileName() + "-corrupt-" + java.util.UUID.randomUUID()));
+                }
+                publish(replacement, filePath);
+            });
+            Logger.info("Recovered derived store [{}] from primary data in [{}] ms", filePath,
+                    (System.nanoTime() - startNanos) / 1_000_000);
+        } finally {
+            IN_FLIGHT_WRITES.decrementAndGet();
+            lock.unlock();
+        }
+    }
+
+    @FunctionalInterface
+    interface StagingBody {
+        void run(Path staging) throws IOException;
+    }
+
+    /** Runs the body against a fresh staging directory that is always removed afterwards. */
+    private void withStaging(final String prefix, final StagingBody body) {
+        Path staging = null;
+        try {
+            staging = newRecoveryStaging(prefix);
+            body.run(staging);
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        } finally {
+            if (staging != null) {
+                try {
+                    deleteDirRecursive(staging);
+                } catch (final IOException e) {
+                    Logger.warn(e, "Failed to remove recovery staging directory [{}]", staging);
+                }
+            }
+        }
+    }
+
+    /** Atomically replaces the live derived store with a fully built staged file. */
+    private void publish(final Path staged, final String livePath) throws IOException {
+        Files.move(staged, Path.of(livePath), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /**
+     * Builds the given indexes under {@code stagingRoot + INDEX_DIR}: one pass per
+     * data file covering all fields, files scanned in parallel. Any failure aborts,
+     * and every index file must exist afterwards, so a partial set is never published.
+     */
+    private void buildIndexes(final Path stagingRoot, final Set<String> fields) throws IOException {
+        Files.createDirectories(Path.of(stagingRoot + INDEX_DIR));
+        final var files = getDataFileState().fileNames();
+        for (final var file : files) {
+            requireDataFile(file);
+        }
+        final var failure = new AtomicReference<Throwable>();
+        CHRONICLE_UTILS.processInParallel(files, file -> {
+            try (final var shared = openDb(file)) {
+                CHRONICLE_UTILS.index(shared, name(), fields, stagingRoot.toString(), averageValue().getClass(),
+                        indexExclusions(), entries());
+            } catch (final Throwable t) {
+                failure.compareAndSet(null, t);
+            }
+        });
+        if (failure.get() != null) {
+            throw new IllegalStateException("Failed to build indexes " + fields, failure.get());
+        }
+        for (final var field : fields) {
+            if (!Files.isRegularFile(Path.of(stagingRoot + INDEX_DIR + field))) {
+                throw new IOException("Index build produced no file for field " + field);
+            }
+        }
+    }
+
+    /**
+     * Staging lives outside {@link #BACKUP_DIR}: backup() clears that directory file
+     * by file and would fail on a leftover staging directory after a crash.
+     */
+    private Path newRecoveryStaging(final String prefix) throws IOException {
+        final var root = Path.of(dataPath() + RECOVERY_STAGING_DIR);
+        Files.createDirectories(root);
+        return Files.createTempDirectory(root, prefix);
+    }
+
+    private void requireDataFile(final String file) throws IOException {
+        if (!Files.isRegularFile(Path.of(dataPath() + DATA_DIR + file))) {
+            throw new IOException("Cannot rebuild derived store: missing primary data file " + file);
+        }
     }
 
     /**
@@ -590,9 +766,24 @@ public interface ChronicleDao<V> {
                 return;
             }
 
+            MAP_DB.registerRecovery(getKeyMapPath(), () -> recoverDerivedStore(getKeyMapPath(), null));
+            for (final var field : indexFileNames()) {
+                MAP_DB.registerRecovery(getIndexPath(field), () -> recoverDerivedStore(getIndexPath(field), field));
+            }
+
             CHRONICLE_UTILS.doWithLock(WRITE_LOCKS, dataPath(), () -> {
                 final var keyMapPath = getKeyMapPath();
                 final var tmpKeyMapPath = keyMapPath + TMP_SUFFIX;
+                // Staging left behind by a crashed rebuild is garbage by definition. Done under
+                // the write lock so a live rebuild can never lose its staging directory.
+                try {
+                    final var staleStaging = Path.of(dataPath() + RECOVERY_STAGING_DIR);
+                    if (Files.exists(staleStaging)) {
+                        deleteDirRecursive(staleStaging);
+                    }
+                } catch (final IOException e) {
+                    Logger.warn(e, "Failed to clear stale recovery staging at [{}]", dataPath());
+                }
                 // Clean up any stale tmp left by a previous interrupted rebuild
                 CHRONICLE_UTILS.deleteFileIfExists(tmpKeyMapPath);
                 // only if we have indexes/have multiple files otherwise hashes are not required
@@ -783,39 +974,23 @@ public interface ChronicleDao<V> {
     }
 
     /**
-     * Builds secondary indexes for the specified fields from a single data file.
-     *
-     * @param db     the open ChronicleMap to index
-     * @param fields the field names to create indexes for
-     */
-    private void initIndex(final SharedChronicleMap<String, V> db, final Set<String> fields) {
-        CHRONICLE_UTILS.index(db, name(), fields, dataPath(), averageValue().getClass(), indexExclusions(), entries());
-    }
-
-    /**
      * Builds secondary indexes for the specified fields across all data files.
      * <p>
-     * Processes all data files in parallel for efficiency.
+     * One pass per data file covers every field and files are scanned in parallel.
+     * Indexes are built in a staging directory and published atomically, so a
+     * failure never leaves a partial index in place. Runs on the write-lock owner.
      * </p>
      *
      * @param fields the field names to create indexes for
      */
     private void initIndex(final Set<String> fields) {
-        final var markerPath = dataPath() + INDEX_DIR + INDEX_REBUILDING_MARKER;
-        try {
-            Files.writeString(Path.of(markerPath), "");
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
-        }
-        try {
-            CHRONICLE_UTILS.processInParallel(getDataFileState().fileNames(), file -> {
-                try (final var shared = openDb(file)) {
-                    initIndex(shared, fields);
-                }
-            });
-        } finally {
-            CHRONICLE_UTILS.deleteFileIfExists(markerPath);
-        }
+        withStaging("mapdb-index-", staging -> {
+            buildIndexes(staging, fields);
+            for (final var field : fields) {
+                MAP_DB.closeIndex(getIndexPath(field));
+                publish(Path.of(staging + INDEX_DIR + field), getIndexPath(field));
+            }
+        });
     }
 
     /**
@@ -3167,8 +3342,11 @@ public interface ChronicleDao<V> {
                 if (deletedValue != null) {
                     // STEP 2: The Cleanup
                     removeFromKeyMap(key, keyHash);
-                    CHRONICLE_UTILS.removeFromIndex(name(), dataPath(), indexFileNames(), Map.of(key, deletedValue),
-                            averageValue().getClass(), keyHashMap);
+                    // Fan-out inside the helper runs on workers: recover corrupt stores here first.
+                    try (final var ignored = holdHealthyDerivedStores()) {
+                        CHRONICLE_UTILS.removeFromIndex(name(), dataPath(), indexFileNames(), Map.of(key, deletedValue),
+                                averageValue().getClass(), keyHashMap);
+                    }
 
                     Logger.info("Deleted using key [{}] at [{}].", key, dataPath());
                     return true;
@@ -3260,7 +3438,11 @@ public interface ChronicleDao<V> {
                     tasks.add(() -> removeAllFromKeyMap(deletedKeyHashMap));
                     tasks.add(() -> CHRONICLE_UTILS.removeFromIndex(name(), dataPath(), indexFileNames(), deletedMap,
                             averageValue().getClass(), keyHashMap));
-                    CHRONICLE_UTILS.processInParallel(tasks);
+                    // Recover corrupt derived stores here, on the write-lock owner, so the
+                    // parallel workers below only ever open healthy stores.
+                    try (final var ignored = holdHealthyDerivedStores()) {
+                        CHRONICLE_UTILS.processInParallel(tasks);
+                    }
                     Logger.info("Deleted [{}] records at [{}].", deletedMap.size(), dataPath());
                     return true;
                 });
@@ -3445,13 +3627,19 @@ public interface ChronicleDao<V> {
                     }
 
                     if (prevValue != null) {
-                        CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames, preparedIndex,
-                                Map.of(key, prevValue),
-                                averageValue().getClass(), indexExclusions(), keyHashMap);
+                        // Fan-out inside the helper runs on workers: recover corrupt stores here first.
+                        try (final var ignored = holdHealthyDerivedStores()) {
+                            CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames, preparedIndex,
+                                    Map.of(key, prevValue),
+                                    averageValue().getClass(), indexExclusions(), keyHashMap);
+                        }
                         Logger.info("Updated using key [{}] at [{}].", key, dataPath());
                         return PutStatus.UPDATED;
                     } else {
-                        CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex);
+                        // Fan-out inside the helper runs on workers: recover corrupt stores here first.
+                        try (final var ignored = holdHealthyDerivedStores()) {
+                            CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex);
+                        }
                         Logger.info("Inserted using key [{}] at [{}].", key, dataPath());
                         return PutStatus.INSERTED;
                     }
@@ -3543,8 +3731,11 @@ public interface ChronicleDao<V> {
                 }
 
                 if (prevValue != null) {
-                    CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames, preparedIndex, Map.of(key, prevValue),
-                            averageValue().getClass(), indexExclusions(), keyHashMap);
+                    // Fan-out inside the helper runs on workers: recover corrupt stores here first.
+                    try (final var ignored = holdHealthyDerivedStores()) {
+                        CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames, preparedIndex, Map.of(key, prevValue),
+                                averageValue().getClass(), indexExclusions(), keyHashMap);
+                    }
                     Logger.info("Updated using key [{}] at [{}].", key, dataPath());
                     return PutStatus.UPDATED;
                 }
@@ -3633,7 +3824,10 @@ public interface ChronicleDao<V> {
                         shared = checkAndRotate(shared);
                         shared.put(key, value);
                         addToKeyMap(key, getDataFileState().currentFile(), keyHash);
-                        CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex);
+                        // Fan-out inside the helper runs on workers: recover corrupt stores here first.
+                        try (final var ignored = holdHealthyDerivedStores()) {
+                            CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex);
+                        }
                         Logger.info("Inserted using key [{}] at [{}].", key, dataPath());
                         return PutStatus.INSERTED;
                     }
@@ -3878,7 +4072,11 @@ public interface ChronicleDao<V> {
                     tasks.add(
                             () -> CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames(), preparedIndex,
                                     prevValues, averageValue().getClass(), indexExclusions(), keyHashMap));
-                    CHRONICLE_UTILS.processInParallel(tasks);
+                    // Recover corrupt derived stores here, on the write-lock owner, so the
+                    // parallel workers below only ever open healthy stores.
+                    try (final var ignored = holdHealthyDerivedStores()) {
+                        CHRONICLE_UTILS.processInParallel(tasks);
+                    }
 
                     if (!prevValues.isEmpty()) {
                         Logger.info("Updated [{}] records at [{}].", prevValues.size(), dataPath());
@@ -4003,8 +4201,11 @@ public interface ChronicleDao<V> {
 
                     // 3. PHASE 3: Indexing
                     // Only happens if the transaction succeeded.
-                    CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames(), preparedIndex, prevValues,
-                            averageValue().getClass(), indexExclusions(), keyHashMap);
+                    // Fan-out inside the helper runs on workers: recover corrupt stores here first.
+                    try (final var ignored = holdHealthyDerivedStores()) {
+                        CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames(), preparedIndex, prevValues,
+                                averageValue().getClass(), indexExclusions(), keyHashMap);
+                    }
                     Logger.info("Updated [{}] records at [{}].", prevValues.size(), dataPath());
                     return status;
                 });
@@ -4202,7 +4403,11 @@ public interface ChronicleDao<V> {
                 // 3. Apply Indexing (Always use the prepared batch, now cleaned)
                 tasks.add(() -> CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex));
 
-                CHRONICLE_UTILS.processInParallel(tasks);
+                // Recover corrupt derived stores here, on the write-lock owner, so the
+                // parallel workers below only ever open healthy stores.
+                try (final var ignored = holdHealthyDerivedStores()) {
+                    CHRONICLE_UTILS.processInParallel(tasks);
+                }
                 Logger.info("Inserted [{}] records at [{}].", dataToInsert.size(), dataPath());
                 return PutStatus.INSERTED;
             });

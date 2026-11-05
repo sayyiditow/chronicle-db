@@ -73,6 +73,15 @@ tasks.withType(JavaCompile) {
 }
 
 test {
+    // /tmp is RAM-backed here and these tests create large memory-mapped files:
+    // keep JUnit @TempDir directories on disk, and clear leftovers from crashed runs.
+    def testTmp = layout.buildDirectory.dir('test-tmp').get().asFile
+    systemProperty 'java.io.tmpdir', testTmp.absolutePath
+    doFirst {
+        delete(testTmp)
+        testTmp.mkdirs()
+    }
+    systemProperty 'chronicle.test.classpath', sourceSets.test.runtimeClasspath.asPath
     useJUnitPlatform()
     jvmArgs(
         "--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED",

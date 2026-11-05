@@ -7,8 +7,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.mapdb.DBException;
+import org.mapdb.DBMaker;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -22,6 +30,9 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -37,17 +48,23 @@ import chronicle.db.entity.Search.SearchType;
  * Tests both single-file (no keymap) and multi-file (with keymap) scenarios.
  */
 @SuppressWarnings("unchecked")
+@Timeout(120)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class ChronicleDaoTest {
     private static final String DAO = "chronicle.db.service.LeadDao";
-    private static final String SINGLE_FILE_PATH = "src/test/.data/single/";
-    private static final String MULTI_FILE_PATH = "src/test/.data/multi/";
+    @TempDir
+    static Path suiteDirectory;
+    private static String SINGLE_FILE_PATH;
+    private static String MULTI_FILE_PATH;
 
     private static ChronicleDao<Lead> singleFileDao;
     private static ChronicleDao<Lead> multiFileDao;
 
     @BeforeAll
     static void setup() throws Throwable {
+        SINGLE_FILE_PATH = suiteDirectory.resolve("single").toString() + "/";
+        MULTI_FILE_PATH = suiteDirectory.resolve("multi").toString() + "/";
+        VACUUM_PATH = suiteDirectory.resolve("vacuum").toString() + "/";
         singleFileDao = CHRONICLE_DB.getChronicleDao(DAO, SINGLE_FILE_PATH);
         multiFileDao = CHRONICLE_DB.getChronicleDao(DAO, MULTI_FILE_PATH);
     }
@@ -725,7 +742,7 @@ public class ChronicleDaoTest {
     // ==================== VACUUM ====================
 
     private static final String VACUUM_DAO = "chronicle.db.service.VacuumTestDao";
-    private static final String VACUUM_PATH = "src/test/.data/vacuum/";
+    private static String VACUUM_PATH;
 
     private static void deleteDirRecursive(final Path path) throws IOException {
         if (!Files.exists(path)) {
@@ -853,7 +870,7 @@ public class ChronicleDaoTest {
     @Test
     @Order(100)
     void crashSafe_staleKeyMapTmp_cleanedAndRebuiltOnStartup() throws Throwable {
-        final var path = "src/test/.data/crash-km-stale/";
+        final var path = suiteDirectory.resolve("crash-km-stale").toString() + "/";
         final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
         dao.put("km-1", createLead("KmOne", "km1@test.com"));
 
@@ -878,7 +895,7 @@ public class ChronicleDaoTest {
     @Test
     @Order(101)
     void crashSafe_successfulKeyMapBuild_leavesNoTmp() throws Throwable {
-        final var path = "src/test/.data/crash-km-clean/";
+        final var path = suiteDirectory.resolve("crash-km-clean").toString() + "/";
         final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
         dao.put("km-2", createLead("KmTwo", "km2@test.com"));
 
@@ -890,7 +907,7 @@ public class ChronicleDaoTest {
     @Test
     @Order(102)
     void crashSafe_refreshKeyMap_leavesNoTmp() throws Throwable {
-        final var path = "src/test/.data/crash-km-refresh/";
+        final var path = suiteDirectory.resolve("crash-km-refresh").toString() + "/";
         final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
         dao.put("km-3", createLead("KmThree", "km3@test.com"));
 
@@ -904,7 +921,7 @@ public class ChronicleDaoTest {
     @Test
     @Order(103)
     void crashSafe_rebuildingMarker_indexWipedAndRebuiltOnStartup() throws Throwable {
-        final var path = "src/test/.data/crash-idx-marker/";
+        final var path = suiteDirectory.resolve("crash-idx-marker").toString() + "/";
         final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
         dao.put("idx-1", createLead("IdxOne", "idx1@test.com"));
 
@@ -927,7 +944,7 @@ public class ChronicleDaoTest {
     @Test
     @Order(104)
     void crashSafe_successfulIndexBuild_leavesNoMarker() throws Throwable {
-        final var path = "src/test/.data/crash-idx-clean/";
+        final var path = suiteDirectory.resolve("crash-idx-clean").toString() + "/";
         final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
         dao.put("idx-2", createLead("IdxTwo", "idx2@test.com"));
 
@@ -939,7 +956,7 @@ public class ChronicleDaoTest {
     @Test
     @Order(105)
     void crashSafe_recoverAllData_allFilesIntactAfterRecovery() throws Throwable {
-        final var path = "src/test/.data/crash-recover/";
+        final var path = suiteDirectory.resolve("crash-recover").toString() + "/";
         final ChronicleDao<Lead> dao = CHRONICLE_DB.getChronicleDao(DAO, path);
         dao.put("rec-1", createLead("RecOne", "rec1@test.com"));
         dao.put("rec-2", createLead("RecTwo", "rec2@test.com"));
@@ -954,5 +971,668 @@ public class ChronicleDaoTest {
         assertEquals(sizeBefore, dao.size(), "all records should still be present after recoverAllData");
         assertNotNull(dao.get("rec-1"), "rec-1 should be accessible after recovery");
         assertNotNull(dao.get("rec-2"), "rec-2 should be accessible after recovery");
+    }
+
+    /**
+     * Child-JVM fixture: halt deliberately bypasses shutdown hooks to reproduce
+     * an unclean store shutdown or interruption before atomic publication.
+     * Only invoked with paths supplied by @TempDir tests.
+     */
+    public static class RecoveryProcess {
+        private static boolean stopDuringScan;
+
+        public static void main(final String[] args) {
+            if ("dirty-index".equals(args[0])) {
+                final var index = MAP_DB.openIndex(args[1]);
+                index.index.add(MAP_DB.createIndexKey("uncommitted", new byte[16]));
+                Runtime.getRuntime().halt(23);
+            } else if ("dirty-primary".equals(args[0])) {
+                // Die while iterating: the entry's segment stays locked in the mmap'd file.
+                final var dao = new VacuumTestDao(args[1]);
+                dao.openDb().forEachEntry(entry -> Runtime.getRuntime().halt(23));
+                throw new AssertionError("No entry was available to hold a segment lock");
+            } else if ("dirty-keymap".equals(args[0])) {
+                final var map = MAP_DB.openMap(args[1]);
+                map.put(new byte[16], new MapDb.KeyMapValue("uncommitted", "data"));
+                Runtime.getRuntime().halt(23);
+            } else {
+                final var dao = new VacuumTestDao(args[1]) {
+                    @Override
+                    public ChronicleDb.SharedChronicleMap<String, Lead> openDb(final String file) {
+                        if (stopDuringScan) {
+                            Runtime.getRuntime().halt(23);
+                        }
+                        return super.openDb(file);
+                    }
+                };
+                stopDuringScan = true;
+                if ("interrupt-keymap".equals(args[0])) {
+                    dao.size();
+                } else {
+                    dao.indexedSearch(new Search("fullName", SearchType.EQUAL, "Alice"));
+                }
+                throw new AssertionError("Recovery never reached the primary scan");
+            }
+        }
+    }
+
+    @Nested
+    class AutomaticRecovery {
+        @TempDir
+        Path directory;
+
+        private RecoveryDao seededDao() {
+            final var dao = new RecoveryDao(directory.toString() + "/");
+            dao.put("one", createLead("Alice", "alice@test.com"));
+            dao.put("two", createLead("Bob", "bob@test.com"));
+            return dao;
+        }
+
+        private class RecoveryDao extends VacuumTestDao {
+            volatile boolean failScan;
+            volatile String failFile;
+            final AtomicInteger scans = new AtomicInteger();
+
+            RecoveryDao(final String path) {
+                super(path);
+            }
+
+            @Override
+            public long recoveryLockWaitSeconds() {
+                return 1; // production waits 30s; keep the busy-writer test fast
+            }
+
+            @Override
+            public ChronicleDb.SharedChronicleMap<String, Lead> openDb(final String file) {
+                if (failScan || file.equals(failFile)) {
+                    throw new IllegalStateException("Injected primary scan failure");
+                }
+                // Constructor calls can arrive before field initialization.
+                if (scans != null) {
+                    scans.incrementAndGet();
+                }
+                return super.openDb(file);
+            }
+        }
+
+        private void breakHeaderChecksum(final Path path) throws Exception {
+            // MapDB 3.1.0 stores the header checksum at offset 20.
+            try (final var file = new RandomAccessFile(path.toFile(), "rw")) {
+                file.seek(20);
+                final int checksum = file.readInt();
+                file.seek(20);
+                file.writeInt(checksum ^ 1);
+            }
+            final var error = assertThrows(DBException.DataCorruption.class,
+                    () -> DBMaker.fileDB(path.toFile()).make());
+            assertTrue(error.getMessage().contains("Header checksum broken"));
+        }
+
+        private void runCrashProcess(final String mode, final String path) throws Exception {
+            final var command = new ArrayList<String>();
+            command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+            java.lang.management.ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
+                    .filter(arg -> arg.startsWith("--add-") || arg.startsWith("--enable-native-access")
+                            || arg.startsWith("--sun-misc-unsafe-memory-access"))
+                    .forEach(command::add);
+            command.add("-cp");
+            command.add(System.getProperty("chronicle.test.classpath"));
+            command.add(RecoveryProcess.class.getName());
+            command.add(mode);
+            command.add(path);
+            final var output = directory.resolve(mode + ".log");
+            final var process = new ProcessBuilder(command).redirectErrorStream(true)
+                    .redirectOutput(output.toFile()).start();
+            try {
+                assertTrue(process.waitFor(20, TimeUnit.SECONDS), "child JVM did not finish");
+                assertEquals(23, process.exitValue(), () -> {
+                    try {
+                        return Files.readString(output);
+                    } catch (final IOException e) {
+                        return e.toString();
+                    }
+                });
+            } finally {
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                    process.waitFor(5, TimeUnit.SECONDS);
+                }
+            }
+        }
+
+        @Test
+        void indexedSearch_abruptJvmExit_reproducesChecksumFailureAndRecovers() throws Exception {
+            final var dao = seededDao();
+            final var path = Path.of(dao.getIndexPath("fullName"));
+            runCrashProcess("dirty-index", path.toString());
+            final var failure = assertThrows(DBException.DataCorruption.class,
+                    () -> DBMaker.fileDB(path.toFile()).make());
+            assertTrue(failure.getMessage().contains("Header checksum broken"));
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+            assertEquals(2, dao.size());
+        }
+
+        @Test
+        void size_abruptJvmExit_reproducesChecksumFailureAndRecovers() throws Exception {
+            final var dao = seededDao();
+            final var path = Path.of(dao.getKeyMapPath());
+            runCrashProcess("dirty-keymap", path.toString());
+            final var failure = assertThrows(DBException.DataCorruption.class,
+                    () -> DBMaker.fileDB(path.toFile()).make());
+            assertTrue(failure.getMessage().contains("Header checksum broken"));
+            assertEquals(2, dao.size());
+        }
+
+        @Test
+        void indexedSearch_interruptedRecovery_nextDaoRebuildsCompleteIndex() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            runCrashProcess("interrupt-index", directory.toString() + "/");
+            final var restarted = new VacuumTestDao(directory.toString() + "/");
+            assertEquals(Set.of("one"), restarted.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+            assertEquals(Set.of("two"), restarted.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Bob")).keySet());
+        }
+
+        @Test
+        void size_interruptedRecovery_nextDaoRebuildsCompleteKeyMap() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            runCrashProcess("interrupt-keymap", directory.toString() + "/");
+            final var restarted = new VacuumTestDao(directory.toString() + "/");
+            assertEquals(2, restarted.size());
+            assertEquals(Set.of("one"), restarted.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+        }
+
+        @Test
+        void size_secondShardScanFails_doesNotPublishPartialKeyMap() throws Exception {
+            final var dao = seededDao();
+            final var values = new HashMap<String, Lead>();
+            for (int i = 0; i < 120; i++) {
+                values.put("record-" + i, createLead("Person" + i, "p" + i + "@test.com"));
+            }
+            dao.put(values);
+            final var path = Path.of(dao.getKeyMapPath());
+            breakHeaderChecksum(path);
+            final var corrupt = directory.resolve("keymap-snapshot");
+            Files.copy(path, corrupt);
+            dao.failFile = "data-2";
+            assertThrows(IllegalStateException.class, dao::size);
+            assertEquals(-1, Files.mismatch(corrupt, path));
+            dao.failFile = null;
+            assertEquals(122, dao.size());
+            assertEquals(values.keySet(), dao.get(values.keySet()).keySet());
+        }
+
+        @Test
+        void size_concurrentRecovery_allCallersSeeCompleteKeyMap() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            final int before = dao.scans.get();
+            final var start = new CountDownLatch(1);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var futures = new ArrayList<java.util.concurrent.Future<Integer>>();
+                for (int i = 0; i < 12; i++) {
+                    futures.add(executor.submit(() -> {
+                        start.await();
+                        return dao.size();
+                    }));
+                }
+                start.countDown();
+                for (final var future : futures) {
+                    assertEquals(2, future.get(15, TimeUnit.SECONDS));
+                }
+            }
+            assertEquals(1, dao.scans.get() - before, "concurrent callers should share one rebuild");
+        }
+
+        @Test
+        void indexedSearch_writerBusy_failsPromptlyAndRecoversAfterWriterFinishes() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            final var lock = ChronicleDao.WRITE_LOCKS.get(dao.dataPath());
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                lock.lock();
+                try {
+                    final var result = executor.submit(() -> assertThrows(IllegalStateException.class,
+                            () -> dao.indexedSearch(new Search("fullName", SearchType.EQUAL, "Alice"))));
+                    assertTrue(result.get(5, TimeUnit.SECONDS).getMessage().contains("retry request"));
+                } finally {
+                    lock.unlock();
+                }
+            }
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+        }
+
+        @Test
+        void put_firstRecords_indexIsPopulatedBeforeSearch() {
+            final var dao = seededDao();
+            assertTrue(Files.isRegularFile(Path.of(dao.getIndexPath("fullName"))));
+            final int before = dao.scans.get();
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+            assertEquals(1, dao.scans.get() - before, "lookup must not need an index rebuild");
+        }
+
+        @Test
+        void put_corruptIndex_recoversBeforeReportingInsertSuccess() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            assertEquals(PutStatus.INSERTED, dao.put("three", createLead("Charlie", "c@test.com")));
+            final int before = dao.scans.get();
+            assertEquals(Set.of("three"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Charlie")).keySet());
+            assertEquals(1, dao.scans.get() - before, "put must already have repaired the index");
+        }
+
+        @Test
+        void put_corruptIndex_recoversBeforeReportingUpdateSuccess() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            assertEquals(PutStatus.UPDATED, dao.put("one", createLead("Changed", "a@test.com")));
+            final int before = dao.scans.get();
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Changed")).keySet());
+            assertEquals(1, dao.scans.get() - before);
+            assertTrue(dao.indexedSearch(new Search("fullName", SearchType.EQUAL, "Alice")).isEmpty());
+        }
+
+        @Test
+        void put_corruptIndex_recoversBeforeReportingBatchSuccess() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            dao.put(Map.of("three", createLead("Charlie", "c@test.com"),
+                    "one", createLead("Changed", "a@test.com")));
+            final int before = dao.scans.get();
+            assertEquals(Set.of("three"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Charlie")).keySet());
+            assertEquals(1, dao.scans.get() - before);
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Changed")).keySet());
+        }
+
+        // ---- write paths against a corrupt keymap (the 01:32 "values do not exist" symptom) ----
+
+        private ArrayList<Lead> leads(final String... names) {
+            final var result = new ArrayList<Lead>();
+            for (final var name : names) {
+                result.add(createLead(name, name.toLowerCase() + "@test.com"));
+            }
+            return result;
+        }
+
+        private Set<String> keysFor(final ChronicleDao<Lead> dao, final String field, final String value) {
+            return dao.indexedSearch(new Search(field, SearchType.EQUAL, value)).keySet();
+        }
+
+        @Test
+        void update_corruptKeyMap_updatesInsteadOfReportingMissingKeys() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            final var status = dao.update(Map.of(
+                    "one", createLead("Changed1", "c1@test.com"),
+                    "two", createLead("Changed2", "c2@test.com")));
+            assertEquals(PutStatus.UPDATED, status);
+            assertEquals("Changed1", dao.get("one").fullName);
+            assertEquals("Changed2", dao.get("two").fullName);
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Changed1"));
+            assertTrue(keysFor(dao, "fullName", "Alice").isEmpty());
+            assertEquals(2, dao.size());
+        }
+
+        @Test
+        void update_singleKey_corruptKeyMap_updates() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            assertEquals(PutStatus.UPDATED, dao.update("one", createLead("Changed", "c@test.com")));
+            assertEquals("Changed", dao.get("one").fullName);
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Changed"));
+            assertEquals(2, dao.size());
+        }
+
+        @Test
+        void put_existingKey_corruptKeyMap_updatesInPlace() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            assertEquals(PutStatus.UPDATED, dao.put("one", createLead("Changed", "c@test.com")));
+            assertEquals(2, dao.size());
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Changed"));
+        }
+
+        @Test
+        void put_newKey_corruptKeyMap_insertsAndKeepsExistingKeys() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            assertEquals(PutStatus.INSERTED, dao.put("three", createLead("Charlie", "c@test.com")));
+            assertEquals(3, dao.size());
+            assertEquals(Set.of("one", "two", "three"), dao.get(Set.of("one", "two", "three")).keySet());
+            assertEquals(PutStatus.UPDATED, dao.put("one", createLead("Alice2", "a2@test.com")),
+                    "existing key must still be recognised as existing after the rebuild");
+        }
+
+        @Test
+        void put_batch_corruptKeyMap_insertsAndUpdates() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            dao.put(Map.of("three", createLead("Charlie", "c@test.com"),
+                    "one", createLead("Changed", "a@test.com")));
+            assertEquals(3, dao.size());
+            assertEquals(Set.of("three"), keysFor(dao, "fullName", "Charlie"));
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Changed"));
+        }
+
+        @Test
+        void delete_corruptKeyMap_deletesOnlyRequestedKey() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            assertTrue(dao.delete("one"));
+            assertNull(dao.get("one"));
+            assertNotNull(dao.get("two"));
+            assertEquals(1, dao.size());
+            assertTrue(keysFor(dao, "fullName", "Alice").isEmpty());
+            assertEquals(Set.of("two"), keysFor(dao, "fullName", "Bob"));
+        }
+
+        @Test
+        void delete_batch_corruptKeyMap_deletesOnlyRequestedKeys() throws Exception {
+            final var dao = seededDao();
+            dao.put("three", createLead("Charlie", "c@test.com"));
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            assertTrue(dao.delete(List.of("one", "three")));
+            assertEquals(1, dao.size());
+            assertEquals(Set.of("two"), keysFor(dao, "fullName", "Bob"));
+            assertTrue(keysFor(dao, "fullName", "Charlie").isEmpty());
+        }
+
+        @Test
+        void delete_corruptIndex_removesRecordFromRebuiltIndex() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            assertTrue(dao.delete("one"));
+            assertTrue(keysFor(dao, "fullName", "Alice").isEmpty());
+            assertEquals(Set.of("two"), keysFor(dao, "fullName", "Bob"));
+            assertEquals(1, dao.size());
+        }
+
+        @Test
+        void delete_batch_corruptIndex_removesRecordsFromRebuiltIndex() throws Exception {
+            final var dao = seededDao();
+            dao.put("three", createLead("Charlie", "c@test.com"));
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            assertTrue(dao.delete(List.of("one", "two")));
+            assertTrue(keysFor(dao, "fullName", "Alice").isEmpty());
+            assertTrue(keysFor(dao, "fullName", "Bob").isEmpty());
+            assertEquals(Set.of("three"), keysFor(dao, "fullName", "Charlie"));
+        }
+
+        @Test
+        void put_keyMapAndIndexBothCorrupt_recoversBothBeforeReportingSuccess() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            assertEquals(PutStatus.INSERTED, dao.put("three", createLead("Charlie", "c@test.com")));
+            assertEquals(3, dao.size());
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Alice"));
+            assertEquals(Set.of("three"), keysFor(dao, "fullName", "Charlie"));
+        }
+
+        // ---- several indexes ----
+
+        private class TwoIndexDao extends RecoveryDao {
+            TwoIndexDao(final String path) {
+                super(path);
+            }
+
+            @Override
+            public Set<String> indexFileNames() {
+                return Set.of("fullName", "email");
+            }
+        }
+
+        private TwoIndexDao seededTwoIndexDao() {
+            final var dao = new TwoIndexDao(directory.toString() + "/");
+            dao.put("one", createLead("Alice", "alice@test.com"));
+            dao.put("two", createLead("Bob", "bob@test.com"));
+            return dao;
+        }
+
+        @Test
+        void multipleIndexes_bothMissingAtStartup_areBuiltTogether() throws Exception {
+            final var dao = seededTwoIndexDao();
+            Files.delete(Path.of(dao.getIndexPath("fullName")));
+            Files.delete(Path.of(dao.getIndexPath("email")));
+            final var restarted = new TwoIndexDao(directory.toString() + "/");
+            assertTrue(Files.isRegularFile(Path.of(restarted.getIndexPath("fullName"))));
+            assertTrue(Files.isRegularFile(Path.of(restarted.getIndexPath("email"))));
+            assertEquals(Set.of("one"), keysFor(restarted, "fullName", "Alice"));
+            assertEquals(Set.of("two"), keysFor(restarted, "email", "bob@test.com"));
+            assertFalse(Files.exists(Path.of(restarted.dataPath() + ChronicleDao.RECOVERY_STAGING_DIR)
+                    .resolve("anything")), "staging must not be left behind");
+        }
+
+        /** Streamed, because index files are preallocated to hundreds of MB. */
+        private byte[] sha256(final Path file) throws Exception {
+            final var digest = java.security.MessageDigest.getInstance("SHA-256");
+            try (final var in = Files.newInputStream(file)) {
+                final var buffer = new byte[1 << 20];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    digest.update(buffer, 0, read);
+                }
+            }
+            return digest.digest();
+        }
+
+        @Test
+        void multipleIndexes_oneCorrupt_rebuildsItAndLeavesTheHealthyOneUntouched() throws Exception {
+            final var dao = seededTwoIndexDao();
+            final var healthy = Path.of(dao.getIndexPath("email"));
+            final var before = sha256(healthy);
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Alice"));
+            assertEquals(Set.of("two"), keysFor(dao, "email", "bob@test.com"));
+            assertTrue(java.util.Arrays.equals(before, sha256(healthy)),
+                    "recovering one index must not rewrite the healthy one");
+        }
+
+        @Test
+        void put_multipleIndexesBothCorrupt_recoversBothAndIndexesNewRecord() throws Exception {
+            final var dao = seededTwoIndexDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            breakHeaderChecksum(Path.of(dao.getIndexPath("email")));
+            assertEquals(PutStatus.INSERTED, dao.put("three", createLead("Charlie", "charlie@test.com")));
+            assertEquals(Set.of("one"), keysFor(dao, "fullName", "Alice"));
+            assertEquals(Set.of("three"), keysFor(dao, "fullName", "Charlie"));
+            assertEquals(Set.of("two"), keysFor(dao, "email", "bob@test.com"));
+            assertEquals(Set.of("three"), keysFor(dao, "email", "charlie@test.com"));
+        }
+
+        @Test
+        void recovery_manyDataFiles_rebuildsEveryRecordInKeyMapAndIndexes() throws Exception {
+            final var dao = new TwoIndexDao(directory.toString() + "/");
+            final var values = new HashMap<String, Lead>();
+            for (int i = 0; i < 250; i++) {
+                values.put("record-" + i, createLead("Person" + i, "p" + i + "@test.com"));
+            }
+            dao.put(values);
+            assertTrue(dao.getDataFileState().fileNames().size() > 1, "test needs several rotated data files");
+            breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            breakHeaderChecksum(Path.of(dao.getIndexPath("email")));
+
+            assertEquals(250, dao.size());
+            assertEquals(values.keySet(), dao.get(values.keySet()).keySet());
+            for (final int i : new int[] { 0, 99, 100, 101, 199, 200, 249 }) {
+                assertEquals(Set.of("record-" + i), keysFor(dao, "fullName", "Person" + i));
+                assertEquals(Set.of("record-" + i), keysFor(dao, "email", "p" + i + "@test.com"));
+            }
+        }
+
+        // ---- primary data: segment lock left behind by a dead process ----
+
+        @Test
+        void primaryData_segmentLockedByDeadProcess_recoversInProcessWithoutLosingRecords() throws Exception {
+            final var dao = seededDao();
+            final var values = new HashMap<String, Lead>();
+            for (int i = 0; i < 60; i++) {
+                values.put("record-" + i, createLead("Person" + i, "p" + i + "@test.com"));
+            }
+            dao.put(values);
+            final int expected = 62;
+
+            runCrashProcess("dirty-primary", directory.toString() + "/");
+
+            // Every write must succeed: whichever hits the abandoned segment triggers
+            // ChronicleDb's in-place deadlock recovery, the rest proceed normally.
+            for (final var key : values.keySet()) {
+                assertEquals(PutStatus.UPDATED, dao.put(key, createLead("Again-" + key, key + "@test.com")));
+            }
+            assertEquals(PutStatus.INSERTED, dao.put("after-crash", createLead("After", "after@test.com")));
+            assertTrue(dao.delete("one"));
+
+            assertEquals(expected, dao.size());
+            assertEquals("Bob", dao.get("two").fullName);
+            assertEquals("Again-record-7", dao.get("record-7").fullName);
+            assertEquals(Set.of("after-crash"), keysFor(dao, "fullName", "After"));
+            assertTrue(Files.exists(Path.of(dao.dataPath() + ChronicleDao.BACKUP_DIR + "corrupted-data")),
+                    "deadlock recovery should have taken place and preserved the corrupt file");
+        }
+
+        @Test
+        void createDataDirs_scanFails_doesNotPublishEmptyKeyMap() throws Exception {
+            final var dao = seededDao();
+            Files.delete(Path.of(dao.getKeyMapPath()));
+            dao.failScan = true;
+            assertThrows(IllegalStateException.class, dao::createDataDirs);
+            assertFalse(Files.exists(Path.of(dao.getKeyMapPath())));
+            dao.failScan = false;
+            dao.createDataDirs();
+            assertEquals(2, dao.size());
+        }
+
+        @Test
+        void indexedSearch_checksumFailure_repeatedlyRecoversAndPreservesEvidence() throws Exception {
+            final var dao = seededDao();
+            for (int attempt = 0; attempt < 3; attempt++) {
+                breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+                assertEquals(Set.of("one"), dao.indexedSearch(
+                        new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+                assertEquals(Set.of("two"), dao.indexedSearch(
+                        new Search("fullName", SearchType.EQUAL, "Bob")).keySet());
+            }
+            try (final var backups = Files.list(Path.of(dao.dataPath() + ChronicleDao.BACKUP_DIR))) {
+                assertEquals(3, backups.filter(path -> path.getFileName().toString()
+                        .startsWith("fullName-corrupt-")).count());
+            }
+        }
+
+        @Test
+        void get_checksumFailure_repeatedlyRecoversAllShards() throws Exception {
+            final var dao = seededDao();
+            final var values = new HashMap<String, Lead>();
+            for (int i = 0; i < 120; i++) {
+                values.put("record-" + i, createLead("Person" + i, "person" + i + "@test.com"));
+            }
+            dao.put(values);
+            assertTrue(dao.getDataFileState().fileNames().size() > 1);
+            for (int attempt = 0; attempt < 3; attempt++) {
+                breakHeaderChecksum(Path.of(dao.getKeyMapPath()));
+                assertNotNull(dao.get("one"));
+                assertEquals(122, dao.size());
+                assertEquals(values.keySet(), dao.get(values.keySet()).keySet());
+            }
+        }
+
+        @Test
+        void indexedSearch_missingIndex_rebuildsInsteadOfReturningEmpty() throws Exception {
+            final var dao = seededDao();
+            Files.delete(Path.of(dao.getIndexPath("fullName")));
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+        }
+
+        @Test
+        void size_missingKeyMap_rebuildsInsteadOfReturningZero() throws Exception {
+            final var dao = seededDao();
+            Files.delete(Path.of(dao.getKeyMapPath()));
+            assertEquals(2, dao.size());
+        }
+
+        @Test
+        void indexedSearch_concurrentRecovery_allCallersSeeCompleteIndex() throws Exception {
+            final var dao = seededDao();
+            breakHeaderChecksum(Path.of(dao.getIndexPath("fullName")));
+            final int before = dao.scans.get();
+            final var start = new CountDownLatch(1);
+            try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                final var futures = new ArrayList<java.util.concurrent.Future<Set<String>>>();
+                for (int i = 0; i < 12; i++) {
+                    futures.add(executor.submit(() -> {
+                        start.await();
+                        return dao.indexedSearch(new Search("fullName", SearchType.EQUAL, "Alice")).keySet();
+                    }));
+                }
+                start.countDown();
+                for (final var future : futures) {
+                    assertEquals(Set.of("one"), future.get(15, TimeUnit.SECONDS));
+                }
+            }
+            // One recovery scan plus one result lookup per caller.
+            assertEquals(13, dao.scans.get() - before);
+        }
+
+        @Test
+        void indexedSearch_scanFails_keepsCorruptFileAndRetriesOnNextRequest() throws Exception {
+            final var dao = seededDao();
+            final var path = Path.of(dao.getIndexPath("fullName"));
+            breakHeaderChecksum(path);
+            final var corrupt = directory.resolve("corrupt-snapshot");
+            Files.copy(path, corrupt);
+            dao.failScan = true;
+            assertThrows(IllegalStateException.class, () -> dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")));
+            assertEquals(-1, Files.mismatch(corrupt, path));
+            dao.failScan = false;
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+        }
+
+        @Test
+        void indexedSearch_missingPrimary_failsWithoutCreatingEmptyPrimaryOrIndex() throws Exception {
+            final var dao = seededDao();
+            final var source = Path.of(dao.dataPath() + ChronicleDao.DATA_DIR + "data");
+            final var saved = directory.resolve("saved-data");
+            Files.move(source, saved);
+            Files.delete(Path.of(dao.getIndexPath("fullName")));
+            assertThrows(java.io.UncheckedIOException.class, () -> dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")));
+            assertFalse(Files.exists(source));
+            assertFalse(Files.exists(Path.of(dao.getIndexPath("fullName"))));
+            Files.move(saved, source);
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+        }
+
+        @Test
+        void indexedSearch_corruptIndex_recoversAllRecordsOnFirstRequest() throws Exception {
+            final var dao = seededDao();
+            Files.write(Path.of(dao.getIndexPath("fullName")), new byte[32]);
+            assertEquals(Set.of("one"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Alice")).keySet());
+            assertEquals(Set.of("two"), dao.indexedSearch(
+                    new Search("fullName", SearchType.EQUAL, "Bob")).keySet());
+        }
+
+        @Test
+        void get_corruptKeyMap_recoversAllRecordsOnFirstRequest() throws Exception {
+            final var dao = seededDao();
+            Files.write(Path.of(dao.getKeyMapPath()), new byte[32]);
+            assertEquals(2, dao.size());
+            assertEquals(Set.of("one", "two"), dao.get(Set.of("one", "two")).keySet());
+        }
     }
 }

@@ -134,12 +134,13 @@ public final class ChronicleDb {
          * and re-opening with recoverPersistedTo. Synchronized so only one thread
          * performs recovery if multiple threads hit the deadlock concurrently.
          */
-        private synchronized void recoverAndSwap(final ChronicleMap<K, V> brokenMap) {
+        private synchronized void recoverAndSwap(final ChronicleMap<K, V> brokenMap, final InterProcessDeadLockException cause) {
             if (map != brokenMap) {
                 Logger.debug("Map [{}] already recovered by another thread. Skipping.", filePath);
                 return;
             }
-            Logger.warn("Deadlock on [{}]. Recovering and swapping map...", filePath);
+            Logger.warn(cause, "Deadlock recovery on [{}], thread [{}], shared holders [{}]. Closing and recovering map.",
+                    filePath, Thread.currentThread().getName(), refCount.get());
             try {
                 map.close();
                 CHRONICLE_DB.backupCorruptedFile(filePath);
@@ -161,7 +162,7 @@ public final class ChronicleDb {
             try {
                 return current.put(key, value);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.put(key, value);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -180,7 +181,7 @@ public final class ChronicleDb {
             try {
                 return current.get(key);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.get(key);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -199,7 +200,7 @@ public final class ChronicleDb {
             try {
                 return current.getUsing(key, usingValue);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.getUsing(key, usingValue);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -217,7 +218,7 @@ public final class ChronicleDb {
             try {
                 return current.containsKey(key);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.containsKey(key);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -236,7 +237,7 @@ public final class ChronicleDb {
             try {
                 return current.remove(key);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.remove(key);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -254,7 +255,7 @@ public final class ChronicleDb {
             try {
                 current.putAll(source.map);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 map.putAll(source.map);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -281,7 +282,7 @@ public final class ChronicleDb {
             try {
                 current.forEachEntry(action);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 map.forEachEntry(action);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -301,7 +302,7 @@ public final class ChronicleDb {
             try {
                 return current.forEachEntryWhile(predicate);
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.forEachEntryWhile(predicate);
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -316,7 +317,7 @@ public final class ChronicleDb {
             try {
                 return current.isEmpty();
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.isEmpty();
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -331,7 +332,7 @@ public final class ChronicleDb {
             try {
                 return current.size();
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.size();
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -346,7 +347,7 @@ public final class ChronicleDb {
             try {
                 return current.longSize();
             } catch (final InterProcessDeadLockException e) {
-                recoverAndSwap(current);
+                recoverAndSwap(current, e);
                 return map.longSize();
             } catch (final IllegalStateException e) {
                 if (map != current) {
@@ -456,6 +457,8 @@ public final class ChronicleDb {
      */
     public void close(final String filePath) {
         mapCache.computeIfPresent(filePath, (k, mapEntry) -> {
+            Logger.warn(new IllegalStateException("Forced ChronicleMap close call site"),
+                    "Force-closing ChronicleMap [{}] with [{}] shared holders", filePath, mapEntry.refCount.get());
             mapEntry.map.close();
             Logger.debug("Closed ChronicleMap at [{}]", filePath);
             return null;
@@ -490,6 +493,8 @@ public final class ChronicleDb {
         for (final var entry : mapCache.entrySet()) {
             final String filePath = entry.getKey();
             final SharedChronicleMap mapEntry = entry.getValue();
+            Logger.warn(new IllegalStateException("Forced ChronicleMap close call site"),
+                    "Force-closing ChronicleMap [{}] with [{}] shared holders", filePath, mapEntry.refCount.get());
             mapEntry.map.close();
             Logger.debug("Closed ChronicleMap at [{}]", filePath);
         }

@@ -3,13 +3,14 @@ package chronicle.db.service;
 import static chronicle.db.service.ChronicleDb.CHRONICLE_DB;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Reproduces the open()/close() data race in the reference-counted cache:
@@ -18,7 +19,10 @@ import org.junit.jupiter.api.Test;
  * handing a borrower a map that is then closed under it
  * (ChronicleHashClosedException).
  */
+@Timeout(120)
 public class ChronicleDbConcurrencyTest {
+    @TempDir
+    Path directory;
 
     private static Lead sample() {
         return new Lead("avg", "linkedin", "fb", "twitter", "avg@test.com", "012", "Engineer", "Loc",
@@ -27,9 +31,7 @@ public class ChronicleDbConcurrencyTest {
 
     @Test
     void concurrentOpenCloseNeverAccessesAfterClose() throws Exception {
-        final Path dir = Path.of("src/test/.data/concurrency");
-        Files.createDirectories(dir);
-        final String filePath = dir.resolve("data").toString();
+        final String filePath = directory.resolve("data").toString();
         final Lead sample = sample();
 
         // Seed one entry so get() actually touches the map, then release.
