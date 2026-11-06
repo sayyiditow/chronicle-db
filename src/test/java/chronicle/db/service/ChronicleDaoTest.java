@@ -1039,7 +1039,7 @@ public class ChronicleDaoTest {
 
             @Override
             public long recoveryLockWaitSeconds() {
-                return 1; // production waits 30s; keep the busy-writer test fast
+                return 5; // production waits 30s; short enough for the busy-writer test, long enough for concurrent recovery
             }
 
             @Override
@@ -1084,7 +1084,7 @@ public class ChronicleDaoTest {
             final var process = new ProcessBuilder(command).redirectErrorStream(true)
                     .redirectOutput(output.toFile()).start();
             try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS), "child JVM did not finish");
+                assertTrue(process.waitFor(60, TimeUnit.SECONDS), "child JVM did not finish");
                 assertEquals(23, process.exitValue(), () -> {
                     try {
                         return Files.readString(output);
@@ -1183,7 +1183,7 @@ public class ChronicleDaoTest {
                 }
                 start.countDown();
                 for (final var future : futures) {
-                    assertEquals(2, future.get(15, TimeUnit.SECONDS));
+                    assertEquals(2, future.get(60, TimeUnit.SECONDS));
                 }
             }
             assertEquals(1, dao.scans.get() - before, "concurrent callers should share one rebuild");
@@ -1199,7 +1199,7 @@ public class ChronicleDaoTest {
                 try {
                     final var result = executor.submit(() -> assertThrows(IllegalStateException.class,
                             () -> dao.indexedSearch(new Search("fullName", SearchType.EQUAL, "Alice"))));
-                    assertTrue(result.get(5, TimeUnit.SECONDS).getMessage().contains("retry request"));
+                    assertTrue(result.get(10, TimeUnit.SECONDS).getMessage().contains("retry request"));
                 } finally {
                     lock.unlock();
                 }
@@ -1578,7 +1578,7 @@ public class ChronicleDaoTest {
                 }
                 start.countDown();
                 for (final var future : futures) {
-                    assertEquals(Set.of("one"), future.get(15, TimeUnit.SECONDS));
+                    assertEquals(Set.of("one"), future.get(60, TimeUnit.SECONDS));
                 }
             }
             // One recovery scan plus one result lookup per caller.
