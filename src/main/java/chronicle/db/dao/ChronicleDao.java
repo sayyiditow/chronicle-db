@@ -180,7 +180,7 @@ public interface ChronicleDao<V> {
             DATA_FILE = "data", LOCKED_FILE = "locked-", RECOVER_FILE = "recovery", ENTRY_SIZE_FILE = "entrySize",
             KEY_FILE = "keys", TMP_SUFFIX = ".tmp", INDEX_REBUILDING_MARKER = ".rebuilding";
     long RECOVERY_LOCK_WAIT_SECONDS = 30;
-    String RECOVERY_STAGING_DIR = "/recovery-staging/";
+    String RECOVERY_STAGING_DIR = "/staging/";
     String[] DB_DIRS = { DATA_DIR, INDEX_DIR, FILES_DIR, BACKUP_DIR };
 
     // Vacuum staging — transient. Created on-demand by vacuum(), cleaned up by
