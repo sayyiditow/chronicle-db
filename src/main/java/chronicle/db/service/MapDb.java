@@ -126,11 +126,11 @@ public final class MapDb {
     public boolean isHealthy(final String path, final boolean index, final long expectedEntries) {
         try {
             if (index) {
-                try (final var ignored = openIndexOnce(path, expectedEntries)) {
+                try (final var _ = openIndexOnce(path, expectedEntries)) {
                     return true;
                 }
             }
-            try (final var ignored = openMapOnce(path, expectedEntries)) {
+            try (final var _ = openMapOnce(path, expectedEntries)) {
                 return true;
             }
         } catch (final StoreUnavailableException e) {

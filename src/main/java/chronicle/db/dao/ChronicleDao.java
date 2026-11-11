@@ -3343,7 +3343,7 @@ public interface ChronicleDao<V> {
                     // STEP 2: The Cleanup
                     removeFromKeyMap(key, keyHash);
                     // Fan-out inside the helper runs on workers: recover corrupt stores here first.
-                    try (final var ignored = holdHealthyDerivedStores()) {
+                    try (final var _ = holdHealthyDerivedStores()) {
                         CHRONICLE_UTILS.removeFromIndex(name(), dataPath(), indexFileNames(), Map.of(key, deletedValue),
                                 averageValue().getClass(), keyHashMap);
                     }
@@ -3440,7 +3440,7 @@ public interface ChronicleDao<V> {
                             averageValue().getClass(), keyHashMap));
                     // Recover corrupt derived stores here, on the write-lock owner, so the
                     // parallel workers below only ever open healthy stores.
-                    try (final var ignored = holdHealthyDerivedStores()) {
+                    try (final var _ = holdHealthyDerivedStores()) {
                         CHRONICLE_UTILS.processInParallel(tasks);
                     }
                     Logger.info("Deleted [{}] records at [{}].", deletedMap.size(), dataPath());
@@ -3628,7 +3628,7 @@ public interface ChronicleDao<V> {
 
                     if (prevValue != null) {
                         // Fan-out inside the helper runs on workers: recover corrupt stores here first.
-                        try (final var ignored = holdHealthyDerivedStores()) {
+                        try (final var _ = holdHealthyDerivedStores()) {
                             CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames, preparedIndex,
                                     Map.of(key, prevValue),
                                     averageValue().getClass(), indexExclusions(), keyHashMap);
@@ -3637,7 +3637,7 @@ public interface ChronicleDao<V> {
                         return PutStatus.UPDATED;
                     } else {
                         // Fan-out inside the helper runs on workers: recover corrupt stores here first.
-                        try (final var ignored = holdHealthyDerivedStores()) {
+                        try (final var _ = holdHealthyDerivedStores()) {
                             CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex);
                         }
                         Logger.info("Inserted using key [{}] at [{}].", key, dataPath());
@@ -3732,7 +3732,7 @@ public interface ChronicleDao<V> {
 
                 if (prevValue != null) {
                     // Fan-out inside the helper runs on workers: recover corrupt stores here first.
-                    try (final var ignored = holdHealthyDerivedStores()) {
+                    try (final var _ = holdHealthyDerivedStores()) {
                         CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames, preparedIndex, Map.of(key, prevValue),
                                 averageValue().getClass(), indexExclusions(), keyHashMap);
                     }
@@ -3825,7 +3825,7 @@ public interface ChronicleDao<V> {
                         shared.put(key, value);
                         addToKeyMap(key, getDataFileState().currentFile(), keyHash);
                         // Fan-out inside the helper runs on workers: recover corrupt stores here first.
-                        try (final var ignored = holdHealthyDerivedStores()) {
+                        try (final var _ = holdHealthyDerivedStores()) {
                             CHRONICLE_UTILS.applyIndexAdditions(dataPath(), preparedIndex);
                         }
                         Logger.info("Inserted using key [{}] at [{}].", key, dataPath());
@@ -4074,7 +4074,7 @@ public interface ChronicleDao<V> {
                                     prevValues, averageValue().getClass(), indexExclusions(), keyHashMap));
                     // Recover corrupt derived stores here, on the write-lock owner, so the
                     // parallel workers below only ever open healthy stores.
-                    try (final var ignored = holdHealthyDerivedStores()) {
+                    try (final var _ = holdHealthyDerivedStores()) {
                         CHRONICLE_UTILS.processInParallel(tasks);
                     }
 
@@ -4202,7 +4202,7 @@ public interface ChronicleDao<V> {
                     // 3. PHASE 3: Indexing
                     // Only happens if the transaction succeeded.
                     // Fan-out inside the helper runs on workers: recover corrupt stores here first.
-                    try (final var ignored = holdHealthyDerivedStores()) {
+                    try (final var _ = holdHealthyDerivedStores()) {
                         CHRONICLE_UTILS.applyIndexUpdates(dataPath(), indexFileNames(), preparedIndex, prevValues,
                                 averageValue().getClass(), indexExclusions(), keyHashMap);
                     }
@@ -4405,7 +4405,7 @@ public interface ChronicleDao<V> {
 
                 // Recover corrupt derived stores here, on the write-lock owner, so the
                 // parallel workers below only ever open healthy stores.
-                try (final var ignored = holdHealthyDerivedStores()) {
+                try (final var _ = holdHealthyDerivedStores()) {
                     CHRONICLE_UTILS.processInParallel(tasks);
                 }
                 Logger.info("Inserted [{}] records at [{}].", dataToInsert.size(), dataPath());

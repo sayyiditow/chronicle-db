@@ -1258,15 +1258,6 @@ public class ChronicleDaoTest {
         }
 
         // ---- write paths against a corrupt keymap (the 01:32 "values do not exist" symptom) ----
-
-        private ArrayList<Lead> leads(final String... names) {
-            final var result = new ArrayList<Lead>();
-            for (final var name : names) {
-                result.add(createLead(name, name.toLowerCase() + "@test.com"));
-            }
-            return result;
-        }
-
         private Set<String> keysFor(final ChronicleDao<Lead> dao, final String field, final String value) {
             return dao.indexedSearch(new Search(field, SearchType.EQUAL, value)).keySet();
         }
