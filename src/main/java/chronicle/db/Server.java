@@ -21,6 +21,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -1040,7 +1041,7 @@ public class Server {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
                 final var mesg = "---------INFO: Shutdown requested. Signal sent to db services.---------\n";
-                Files.writeString(infoLogPath, mesg);
+                Files.writeString(infoLogPath, mesg, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (final IOException e) {
             }
 
@@ -1058,7 +1059,8 @@ public class Server {
             int inFlight = ChronicleDao.IN_FLIGHT_WRITES.get();
             if (inFlight > 0) {
                 try {
-                    Files.writeString(infoLogPath, "INFO: [" + inFlight + "] In-flight writes pending. Waiting...\n");
+                    Files.writeString(infoLogPath, "INFO: [" + inFlight + "] In-flight writes pending. Waiting...\n",
+                            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
                 } catch (final IOException e) {
                 }
             }
@@ -1073,7 +1075,8 @@ public class Server {
             if (inFlight > 0) {
                 try {
                     Files.writeString(infoLogPath,
-                            "WARN: Shutdown drain timed out with [" + inFlight + "] in-flight writes pending.\n");
+                            "WARN: Shutdown drain timed out with [" + inFlight + "] in-flight writes pending.\n",
+                            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
                 } catch (final IOException e) {
                 }
             }
@@ -1107,7 +1110,7 @@ public class Server {
 
             try {
                 final var mesg = "---------INFO: Shutdown complete.---------\n";
-                Files.writeString(infoLogPath, mesg);
+                Files.writeString(infoLogPath, mesg, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (final IOException e) {
             }
         }));
